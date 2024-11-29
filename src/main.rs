@@ -1,70 +1,79 @@
 #![deny(unsafe_code)]
+#![deny(warnings)]
 #![no_main]
 #![no_std]
 
-// Import necessary crates
-use cortex_m_rt::entry;
-use fugit::Duration;
+// Остановка при панике
 use panic_halt as _;
-use stm32f4xx_hal::adc::config::AdcConfig;
-use stm32f4xx_hal::prelude::*;
-use stm32f4xx_hal::{adc, pac};
+
+use cortex_m::iprintln;
+use cortex_m_rt::entry;
+
+use stm32f4xx_hal::{
+    self as hal,
+    adc::Adc,
+    pac::{self, TIM4},
+    prelude::*,
+    timer::{Channel, ChannelBuilder},
+};
 
 #[entry]
 fn main() -> ! {
-    // Take ownership of device peripherals
-    let dp = pac::Peripherals::take().unwrap();
+    if let (Some(dp), Some(mut itm)) = (
+        pac::Peripherals::take(),
+        cortex_m::Peripherals::take().map(|p| p.ITM),
+    ) {
+        // Настраиваем тактирование системы на 84 МГц
+        let rcc = dp.RCC.constrain();
+        let clocks = rcc.cfgr.sysclk(84.MHz()).freeze();
 
-    // Configure the system clock
-    let rcc = dp.RCC.constrain();
-    let clocks = rcc.cfgr.sysclk(48.MHz()).freeze();
+        iprintln!(&mut itm.stim[0], "Программа запущена!");
 
-    // Configure GPIO and ADC
-    let gpioa = dp.GPIOA.split();
-    let mut adc_pin = gpioa.pa0.into_analog(); // PA0 connected to LM35
+        // Настраиваем GPIOB для управления транзистором через PB6 (ШИМ)
+        let gpiob = dp.GPIOB.split();
+        let pwm_pin = gpiob.pb6.into_alternate(); // Настраиваем PB6 как альтернативную функцию (ШИМ)
 
-    // let adc_config = adc::config::AdcConfig;
-    let mut adc = adc::Adc::adc1(dp.ADC1, true, AdcConfig::default());
+        // Создаем канал ШИМ для TIM4
+        let chan: ChannelBuilder<TIM4, 0, false, _> = ChannelBuilder::new(pwm_pin);
 
-    // Configure PWM (PB6 for TIM4)
-    let gpiob = dp.GPIOB.split();
-    let pwm_pin = gpiob.pb6.into_alternate(); // Use PB6 for TIM4 (Alternate function for TIM4_CH1)
-    const DENOM: u32 = 1_000_000; // denominator (e.g., for microseconds)
+        // Конфигурируем таймер TIM4 для работы с частотой ШИМ 20 кГц
+        let mut pwm = dp.TIM4.pwm_hz(chan, 20.kHz(), &clocks);
 
-    // Define the duration in ticks (e.g., 1 million ticks for 1 second)
-    let pwm_freq: Duration<u32, 1, DENOM> = Duration::<u32, 1, DENOM>::from_ticks(1_000_000);
+        // Устанавливаем начальный цикл заполнения (duty cycle) 50%
+        let max_duty = pwm.get_max_duty();
+        pwm.set_duty(Channel::C1, max_duty / 2); // 50%
+        pwm.enable(Channel::C1); // Включаем ШИМ
 
-    // let mut pwm = dp.TIM4.pwm(pwm_pin, pwm_freq, &clocks);
-    let (_, (ch1, ch2, ..)) = dp.TIM1.pwm_us(pwm_pin, pwm_freq, &clocks);
-    let mut ch1 = ch1.with(gpioa.pa8);
-    let mut _ch2 = ch2.with(gpioa.pa9);
+        // Настраиваем GPIOA для работы с АЦП (PA0 подключен к LM35)
+        let gpioa = dp.GPIOA.split();
+        let mut analog_pin = gpioa.pa0.into_analog();
 
-    let max_duty = ch1.get_max_duty();
-    ch1.set_duty(max_duty / 2);
-    ch1.enable();
+        // Конфигурируем АЦП
+        let mut adc = Adc::adc1(dp.ADC1, true, hal::adc::config::AdcConfig::default());
 
-    pwm.enable();
-    let max_duty = pwm.get_max_duty();
+        loop {
+            // Считываем значение с LM35 (PA0)
+            let temperature_value: u16 = adc.read(&mut analog_pin).unwrap();
 
-    // Main loop
-    loop {
-        // Read temperature from ADC
-        let adc_value: u16 = adc.read(&mut adc_pin).unwrap();
-        let temperature = (adc_value as f32) * 3.3 / 4095.0 * 100.0; // LM35 conversion
+            // Преобразуем значение из АЦП в температуру (например, в градусах Цельсия)
+            // LM35 дает 10 мВ/°C, АЦП STM32F4 имеет разрешение 12 бит (0–4095)
+            // при референсном напряжении 3.3 В
+            let temperature_celsius = (temperature_value as f32) * 3.3 / 4095.0 * 100.0;
 
-        // Map temperature to PWM duty cycle
-        let duty = calculate_duty(temperature, max_duty);
-        pwm.set_duty(duty);
+            // Управляем скоростью мотора в зависимости от температуры
+            if temperature_celsius > 60.0 {
+                // Если температура выше 30 °C, увеличиваем мощность (75% duty cycle)
+                pwm.set_duty(Channel::C1, (max_duty * 3) / 4);
+            } else {
+                // Если температура ниже или равна 30 °C, уменьшаем мощность (50% duty cycle)
+                pwm.set_duty(Channel::C1, max_duty / 2);
+            }
+
+            cortex_m::asm::nop(); // Задержка (можно добавить таймер, если нужно)
+        }
     }
-}
 
-// Map temperature to PWM duty cycle
-fn calculate_duty(temperature: f32, max_duty: u16) -> u16 {
-    if temperature < 25.0 {
-        0 // Fan off
-    } else if temperature > 70.0 {
-        max_duty // Full speed
-    } else {
-        ((temperature - 25.0) / 45.0 * max_duty as f32) as u16
+    loop {
+        cortex_m::asm::nop(); // Бесконечный цикл
     }
 }

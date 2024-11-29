@@ -1,5 +1,5 @@
 [package]
-name = "arm-snake"
+name = "pwm-fan"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,6 +12,7 @@ ws2812-spi = "0.5.0"
 rand = { version = "0.8.5", default-features = false }
 rand_pcg = "0.3.1"
 fugit = "0.3.7"
+micromath = "2.1.0"
 
 [dependencies.stm32f4xx-hal]
 version = "0.20.0"
