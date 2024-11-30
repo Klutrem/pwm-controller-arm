@@ -2,6 +2,7 @@
 #![no_std]
 
 use panic_halt as _;
+use stm32f4xx_hal::pac::TIM1;
 
 use crate::hal::spi::{Mode, Phase, Polarity};
 use crate::hal::{gpio::Pull, prelude::*};
@@ -10,7 +11,7 @@ use stm32f4xx_hal as hal;
 use stm32f4xx_hal::{
     pac::{self, TIM4},
     prelude::*,
-    timer::{Channel, ChannelBuilder},
+    timer::{Channel, ChannelBuilder, Times},
 };
 
 pub const MODE: Mode = Mode {
@@ -44,7 +45,6 @@ fn main() -> ! {
     cs.set_high();
 
     let mut led = gpioa.pa0.into_push_pull_output();
-    led.set_low();
 
     let vref = 5.0; // Опорное напряжение
     let adc_max_value: f32 = 4095.0;
@@ -53,8 +53,8 @@ fn main() -> ! {
     let calculated_threshold = TEMPERATURE_THRESHOLD * adc_max_value / (vref * 100.0);
     let max_duty = pwm.get_max_duty();
 
-    pwm.set_duty(Channel::C2, max_duty);
-    pwm.enable(Channel::C2);
+    pwm.set_duty(Channel::C1, max_duty);
+    pwm.enable(Channel::C1);
 
     let mut buffer = [0x00, 0x00];
 
@@ -67,13 +67,15 @@ fn main() -> ! {
 
         // Управление светодиодом
         if raw_value as f32 > calculated_threshold {
-            led.set_high();
+            led.toggle();
         } else {
             led.set_low();
         }
 
         // Пропорциональное управление вентилятором
         let duty_cycle = ((raw_value as f32 / adc_max_value) * max_duty as f32) as u16;
-        pwm.set_duty(Channel::C2, duty_cycle);
+        pwm.set_duty(Channel::C1, duty_cycle);
+
+        cortex_m::asm::nop();
     }
 }
